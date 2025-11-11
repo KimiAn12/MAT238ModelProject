@@ -77,19 +77,21 @@ def simulate_sir(beta: float, nu: float, S0: int, I0: int, R0: int, N: int, days
     return S, I, R
 
 
-def objective_function(params: np.ndarray, data: pd.DataFrame, S0: int, I0: int, R0: int, N: int) -> float:
+def objective_function(params: np.ndarray, data: pd.DataFrame, S0: int, I0: int, R0: int, N: int, use_cumulative: bool = True) -> float:
     """
     Objective function for parameter fitting.
     Calculates mean squared error between simulated and observed infection data.
     
     Args:
         params: Array [beta, nu] to be optimized
-        data: DataFrame with 'date' and 'infected' columns
+        data: DataFrame with 'date' and 'infected' columns (or 'cumulative_cases')
         S0, I0, R0: Initial conditions
         N: Total population
+        use_cumulative: If True, compare (I + R) to cumulative cases.
+                       If False, compare I to active cases.
     
     Returns:
-        Mean squared error (MSE) between simulated and observed infections
+        Mean squared error (MSE) between simulated and observed data
     """
     beta, nu = params
     
@@ -99,14 +101,23 @@ def objective_function(params: np.ndarray, data: pd.DataFrame, S0: int, I0: int,
     # Run simulation
     S, I, R = simulate_sir(beta, nu, S0, I0, R0, N, days)
     
-    # Calculate mean squared error between simulated I and observed infections
-    observed_I = data['infected'].values
-    mse = np.mean((I[:len(observed_I)] - observed_I) ** 2)
+    # Get observed data
+    if use_cumulative and 'cumulative_cases' in data.columns:
+        # Compare cumulative infections (I + R) to observed cumulative cases
+        simulated_cumulative = (I + R)[:len(data)]
+        observed = data['cumulative_cases'].values
+    else:
+        # Compare active infections I to observed active cases
+        simulated_cumulative = I[:len(data)]
+        observed = data['infected'].values
+    
+    # Calculate mean squared error
+    mse = np.mean((simulated_cumulative - observed) ** 2)
     
     return mse
 
 
-def fit_parameters(data: pd.DataFrame, S0: int, I0: int, R0: int, N: int) -> Tuple[float, float]:
+def fit_parameters(data: pd.DataFrame, S0: int, I0: int, R0: int, N: int, use_cumulative: bool = True) -> Tuple[float, float]:
     """
     Fits SIR model parameters β and ν to minimize MSE between simulated and observed data.
     
@@ -114,11 +125,13 @@ def fit_parameters(data: pd.DataFrame, S0: int, I0: int, R0: int, N: int) -> Tup
     differential_evolution for global optimization if needed.
     
     Args:
-        data: DataFrame with 'date' and 'infected' columns
+        data: DataFrame with 'date' and 'infected' columns (or 'cumulative_cases')
         S0: Initial susceptible population
         I0: Initial infected population
         R0: Initial recovered population
         N: Total population
+        use_cumulative: If True, fit to cumulative cases (I + R).
+                       If False, fit to active cases (I).
     
     Returns:
         Tuple of (optimal_beta, optimal_nu)
@@ -137,7 +150,7 @@ def fit_parameters(data: pd.DataFrame, S0: int, I0: int, R0: int, N: int) -> Tup
         result = minimize(
             objective_function,
             x0=[initial_beta, initial_nu],
-            args=(data, S0, I0, R0, N),
+            args=(data, S0, I0, R0, N, use_cumulative),
             method='L-BFGS-B',
             bounds=bounds,
             options={'maxiter': 1000}
@@ -155,7 +168,7 @@ def fit_parameters(data: pd.DataFrame, S0: int, I0: int, R0: int, N: int) -> Tup
     result = differential_evolution(
         objective_function,
         bounds=bounds,
-        args=(data, S0, I0, R0, N),
+        args=(data, S0, I0, R0, N, use_cumulative),
         seed=42,
         maxiter=1000,
         popsize=15
@@ -166,39 +179,114 @@ def fit_parameters(data: pd.DataFrame, S0: int, I0: int, R0: int, N: int) -> Tup
     return beta_opt, nu_opt
 
 
-def load_data(csv_path: str) -> pd.DataFrame:
+def load_data(csv_path: str, use_cumulative: bool = True) -> pd.DataFrame:
     """
     Loads infection data from CSV file.
     
-    Expected format:
-        date, infected
+    Supports two formats:
+    1. Simple format: date, infected
+    2. Ontario COVID-19 format: date, totalcases, numdeaths, etc.
     
     Args:
         csv_path: Path to input CSV file
+        use_cumulative: If True, use cumulative cases for SIR model fitting.
+                       If False, calculate active cases from cumulative data.
     
     Returns:
         DataFrame with 'date' and 'infected' columns
+        If Ontario format detected, also includes 'cumulative_cases' and 'deaths'
     """
     data = pd.read_csv(csv_path)
     
-    # Validate required columns
-    if 'date' not in data.columns or 'infected' not in data.columns:
-        raise ValueError("CSV must contain 'date' and 'infected' columns")
+    # Convert date column to datetime
+    if 'date' in data.columns:
+        data['date'] = pd.to_datetime(data['date'])
+    else:
+        raise ValueError("CSV must contain 'date' column")
     
-    # Convert date column to datetime if it's not already
-    data['date'] = pd.to_datetime(data['date'])
+    # Check if this is the Ontario COVID-19 format
+    if 'totalcases' in data.columns:
+        print("Detected Ontario COVID-19 format (totalcases column found)")
+        
+        # Handle missing values (some rows have '-' for recent data)
+        data['totalcases'] = pd.to_numeric(data['totalcases'], errors='coerce')
+        if 'numdeaths' in data.columns:
+            data['numdeaths'] = pd.to_numeric(data['numdeaths'], errors='coerce').fillna(0)
+        else:
+            data['numdeaths'] = 0
+        
+        # Remove rows with missing totalcases (incomplete data)
+        data = data.dropna(subset=['totalcases'])
+        data = data[data['totalcases'] >= 0]  # Remove negative values
+        
+        # Sort by date to ensure chronological order
+        data = data.sort_values('date').reset_index(drop=True)
+        
+        if use_cumulative:
+            # Use cumulative cases as (I + R) in SIR model
+            # For fitting, we'll compare I(t) + R(t) to totalcases
+            data['infected'] = data['totalcases'].values
+            data['cumulative_cases'] = data['totalcases'].values
+            print(f"Using cumulative cases (I+R) for SIR model fitting")
+        else:
+            # Estimate active cases: cumulative cases - recovered - deaths
+            # This is an approximation since we don't have exact recovery data
+            # Assume recovery time of ~14 days on average
+            data['cumulative_cases'] = data['totalcases'].values
+            
+            # Calculate active cases by assuming cases recover after recovery_period days
+            # This is a simplified approach - for more accuracy, use a moving window
+            recovery_period = 14  # days
+            active_cases = []
+            for i in range(len(data)):
+                # Active cases ≈ cases from last recovery_period days
+                current_date = data.iloc[i]['date']
+                cutoff_date = current_date - pd.Timedelta(days=recovery_period)
+                mask = (data['date'] > cutoff_date) & (data['date'] <= current_date)
+                recent_cases = data[mask]
+                if len(recent_cases) > 0:
+                    # Estimate active: new cases in recovery period
+                    if i >= recovery_period:
+                        active = data.iloc[i]['totalcases'] - data.iloc[i - recovery_period]['totalcases']
+                    else:
+                        active = data.iloc[i]['totalcases']
+                else:
+                    active = data.iloc[i]['totalcases']
+                active_cases.append(max(0, active))
+            
+            data['infected'] = active_cases
+            print(f"Estimated active cases using {recovery_period}-day recovery period")
+        
+        print(f"Data range: {data['date'].min()} to {data['date'].max()}")
+        print(f"Total data points: {len(data)}")
+        print(f"Max cumulative cases: {data['cumulative_cases'].max():,.0f}")
+        if 'numdeaths' in data.columns:
+            print(f"Max deaths: {data['numdeaths'].max():,.0f}")
     
-    # Ensure infected values are numeric
-    data['infected'] = pd.to_numeric(data['infected'], errors='coerce')
+    elif 'infected' in data.columns:
+        # Simple format: date, infected
+        print("Detected simple format (infected column found)")
+        data['infected'] = pd.to_numeric(data['infected'], errors='coerce')
+        data = data.dropna(subset=['infected'])
+        data = data[data['infected'] >= 0]
+        
+        # Sort by date
+        data = data.sort_values('date').reset_index(drop=True)
+        
+        # Create cumulative_cases column for consistency
+        data['cumulative_cases'] = data['infected'].cumsum()
+    else:
+        raise ValueError("CSV must contain either 'infected' or 'totalcases' column")
     
-    # Remove any rows with missing values
-    data = data.dropna()
+    # Ensure we have valid data
+    if len(data) == 0:
+        raise ValueError("No valid data found after processing")
     
     return data
 
 
 def export_results(data: pd.DataFrame, S: np.ndarray, I: np.ndarray, R: np.ndarray, 
-                   beta: float, nu: float, output_path: str):
+                   beta: float, nu: float, output_path: str, use_cumulative: bool = True):
     """
     Exports simulation results to CSV file for Excel plotting.
     
@@ -209,18 +297,27 @@ def export_results(data: pd.DataFrame, S: np.ndarray, I: np.ndarray, R: np.ndarr
         S, I, R: Simulated arrays from SIR model
         beta, nu: Fitted parameters
         output_path: Path to output CSV file
+        use_cumulative: If True, use cumulative cases as observed_I
     """
     # Create output directory if it doesn't exist
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Prepare export DataFrame
+    # Determine observed_I based on data type
+    # For cumulative cases format, use cumulative cases as observed_I
+    # For active cases format, use infected as observed_I
+    if use_cumulative and 'cumulative_cases' in data.columns:
+        observed_I = data['cumulative_cases'].values
+    else:
+        observed_I = data['infected'].values
+    
+    # Prepare export DataFrame in simple format matching ex_output.csv
     export_data = pd.DataFrame({
         'date': data['date'].values,
         'S': S[:len(data)],
         'I': I[:len(data)],
         'R': R[:len(data)],
-        'observed_I': data['infected'].values,
+        'observed_I': observed_I,
         'beta': beta,
         'nu': nu
     })
@@ -231,7 +328,7 @@ def export_results(data: pd.DataFrame, S: np.ndarray, I: np.ndarray, R: np.ndarr
 
 
 def plot_results(data: pd.DataFrame, S: np.ndarray, I: np.ndarray, R: np.ndarray, 
-                 beta: float, nu: float, save_path: str = None):
+                 beta: float, nu: float, save_path: str = None, use_cumulative: bool = True):
     """
     Plots simulated vs observed infection curves.
     
@@ -240,33 +337,54 @@ def plot_results(data: pd.DataFrame, S: np.ndarray, I: np.ndarray, R: np.ndarray
         S, I, R: Simulated arrays
         beta, nu: Fitted parameters
         save_path: Optional path to save the plot
+        use_cumulative: If True, plot cumulative cases comparison
     """
-    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
-    
     days = len(data)
     dates = data['date'].values
     
-    # Plot 1: Infections (Simulated vs Observed)
-    axes[0].plot(dates, I[:days], 'b-', label='Simulated I(t)', linewidth=2)
-    axes[0].scatter(dates, data['infected'].values, color='red', marker='o', 
-                    label='Observed Infections', s=50, alpha=0.7)
-    axes[0].set_xlabel('Date')
-    axes[0].set_ylabel('Number of Infected')
-    axes[0].set_title(f'SIR Model Fit: Infections (beta = {beta:.4f}, nu = {nu:.4f})')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-    axes[0].tick_params(axis='x', rotation=45)
+    # Determine number of subplots based on data availability
+    if use_cumulative and 'cumulative_cases' in data.columns:
+        fig, axes = plt.subplots(3, 1, figsize=(12, 12))
+    else:
+        fig, axes = plt.subplots(2, 1, figsize=(12, 10))
     
-    # Plot 2: All compartments (S, I, R)
-    axes[1].plot(dates, S[:days], 'g-', label='Susceptible (S)', linewidth=2)
-    axes[1].plot(dates, I[:days], 'b-', label='Infected (I)', linewidth=2)
-    axes[1].plot(dates, R[:days], 'r-', label='Recovered (R)', linewidth=2)
-    axes[1].set_xlabel('Date')
-    axes[1].set_ylabel('Population')
-    axes[1].set_title('SIR Model: All Compartments')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-    axes[1].tick_params(axis='x', rotation=45)
+    # Plot 1: Cumulative Infections (I + R) vs Observed Cumulative Cases
+    if use_cumulative and 'cumulative_cases' in data.columns:
+        axes[0].plot(dates, (I + R)[:days], 'b-', label='Simulated Cumulative (I+R)', linewidth=2)
+        axes[0].scatter(dates, data['cumulative_cases'].values, color='red', marker='o', 
+                        label='Observed Cumulative Cases', s=50, alpha=0.7)
+        axes[0].set_xlabel('Date')
+        axes[0].set_ylabel('Cumulative Infections')
+        axes[0].set_title(f'SIR Model Fit: Cumulative Infections (beta = {beta:.4f}, nu = {nu:.4f})')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        axes[0].tick_params(axis='x', rotation=45)
+        plot_idx = 1
+    else:
+        plot_idx = 0
+    
+    # Plot 2: Active Infections (I) vs Observed
+    axes[plot_idx].plot(dates, I[:days], 'b-', label='Simulated I(t)', linewidth=2)
+    if not use_cumulative or 'cumulative_cases' not in data.columns:
+        axes[plot_idx].scatter(dates, data['infected'].values, color='red', marker='o', 
+                               label='Observed Infections', s=50, alpha=0.7)
+    axes[plot_idx].set_xlabel('Date')
+    axes[plot_idx].set_ylabel('Number of Infected')
+    axes[plot_idx].set_title(f'SIR Model: Active Infections (beta = {beta:.4f}, nu = {nu:.4f})')
+    axes[plot_idx].legend()
+    axes[plot_idx].grid(True, alpha=0.3)
+    axes[plot_idx].tick_params(axis='x', rotation=45)
+    
+    # Plot 3: All compartments (S, I, R)
+    axes[plot_idx + 1].plot(dates, S[:days], 'g-', label='Susceptible (S)', linewidth=2)
+    axes[plot_idx + 1].plot(dates, I[:days], 'b-', label='Infected (I)', linewidth=2)
+    axes[plot_idx + 1].plot(dates, R[:days], 'r-', label='Recovered (R)', linewidth=2)
+    axes[plot_idx + 1].set_xlabel('Date')
+    axes[plot_idx + 1].set_ylabel('Population')
+    axes[plot_idx + 1].set_title('SIR Model: All Compartments')
+    axes[plot_idx + 1].legend()
+    axes[plot_idx + 1].grid(True, alpha=0.3)
+    axes[plot_idx + 1].tick_params(axis='x', rotation=45)
     
     plt.tight_layout()
     
@@ -291,8 +409,8 @@ def main():
     parser.add_argument(
         '--population',
         type=int,
-        default=1000000,
-        help='Total population N (default: 1000000)'
+        default=None,
+        help='Total population N (default: auto-detect for Ontario, or 1000000)'
     )
     parser.add_argument(
         '--output',
@@ -311,31 +429,113 @@ def main():
         default=None,
         help='Path to save plot image (optional)'
     )
+    parser.add_argument(
+        '--use-cumulative',
+        action='store_true',
+        help='Use cumulative cases for fitting (I+R) - auto-enabled for Ontario data'
+    )
+    parser.add_argument(
+        '--use-active',
+        action='store_true',
+        help='Use active cases for fitting instead of cumulative (overrides --use-cumulative)'
+    )
     
     args = parser.parse_args()
     
-    # Load data
+    # Load data (temporarily with default use_cumulative to check format)
     print(f"Loading data from: {args.data}")
-    data = load_data(args.data)
+    data_temp = pd.read_csv(args.data)
+    
+    # Determine if we should use cumulative cases
+    # Auto-detect: if Ontario format (has totalcases), use cumulative by default
+    is_ontario_format = 'totalcases' in data_temp.columns
+    if args.use_active:
+        use_cumulative = False
+    elif args.use_cumulative:
+        use_cumulative = True
+    else:
+        # Auto-detect: use cumulative if Ontario format
+        use_cumulative = is_ontario_format
+    
+    # Now load with correct setting
+    data = load_data(args.data, use_cumulative=use_cumulative)
     print(f"Loaded {len(data)} data points")
     
+    # Auto-detect population if not specified
+    if args.population is None:
+        # Check if this is Ontario data
+        if 'prname' in data.columns:
+            ontario_rows = data['prname'].str.contains('Ontario', case=False, na=False)
+            if ontario_rows.any():
+                # Ontario population (approximately 14.5-15 million during 2020-2024)
+                args.population = 15000000
+                print(f"Auto-detected Ontario data, using population: {args.population:,}")
+            else:
+                args.population = 1000000
+                print(f"Using default population: {args.population:,}")
+        elif is_ontario_format:
+            # Likely Ontario data based on format
+            args.population = 15000000
+            print(f"Detected Ontario COVID-19 format, using population: {args.population:,}")
+        else:
+            args.population = 1000000
+            print(f"Using default population: {args.population:,}")
+    
     # Set initial conditions
-    # I0: first observed infection count
-    I0 = int(data['infected'].iloc[0])
-    # R0: assume no recovered initially
-    R0 = 0
+    if use_cumulative and 'cumulative_cases' in data.columns:
+        # For cumulative cases: I0 + R0 = first cumulative case
+        first_cumulative = int(data['cumulative_cases'].iloc[0])
+        
+        # For early epidemic: assume most cases are still active
+        # Use deaths for R0 if available, otherwise assume minimal recovery
+        if 'numdeaths' in data.columns:
+            initial_deaths = int(data['numdeaths'].iloc[0])
+        else:
+            initial_deaths = 0
+        
+        # At the start of an epidemic, most cases are active
+        # For SIR model: I0 + R0 = first_cumulative
+        # R0 includes deaths (and recoveries, but at start mostly deaths)
+        if first_cumulative > 0:
+            # Use deaths as initial R0 (recovered/removed)
+            R0 = min(initial_deaths, first_cumulative - 1)  # Ensure at least 1 infected
+            I0 = first_cumulative - R0
+            # Ensure I0 is at least 1 to allow the epidemic to progress
+            if I0 < 1:
+                I0 = 1
+                R0 = first_cumulative - I0
+        else:
+            # No cases yet - start with 1 infected to begin simulation
+            I0 = 1
+            R0 = 0
+            first_cumulative = 1  # Adjust for consistency
+    else:
+        # For active cases: use first observed infection count
+        I0 = max(1, int(data['infected'].iloc[0]))
+        R0 = 0
+    
     # S0: remaining population
     S0 = args.population - I0 - R0
+    
+    # Ensure S0 is non-negative
+    if S0 < 0:
+        print(f"Warning: S0 is negative ({S0}). Adjusting population or initial conditions.")
+        # Adjust I0 to fit within population
+        I0 = min(I0, args.population - R0)
+        S0 = args.population - I0 - R0
     
     print(f"\nInitial Conditions:")
     print(f"  Total Population (N): {args.population:,}")
     print(f"  Initial Susceptible (S0): {S0:,}")
     print(f"  Initial Infected (I0): {I0:,}")
     print(f"  Initial Recovered (R0): {R0:,}")
+    if use_cumulative and 'cumulative_cases' in data.columns:
+        print(f"  First Observed Cumulative Cases: {data['cumulative_cases'].iloc[0]:,.0f}")
     
     # Fit parameters
     print(f"\nFitting parameters beta and nu...")
-    beta, nu = fit_parameters(data, S0, I0, R0, args.population)
+    print(f"  Fitting method: {'Cumulative cases (I+R)' if use_cumulative else 'Active cases (I)'}")
+    beta, nu = fit_parameters(data, S0, I0, R0, args.population, use_cumulative=use_cumulative)
     
     # Run simulation
     print(f"\nRunning SIR simulation...")
@@ -344,14 +544,18 @@ def main():
     
     # Export results
     print(f"\nExporting results...")
-    export_results(data, S, I, R, beta, nu, args.output)
+    export_results(data, S, I, R, beta, nu, args.output, use_cumulative=use_cumulative)
     
     # Optional plotting
     if args.plot or args.plot_save:
         print(f"\nGenerating plot...")
-        plot_results(data, S, I, R, beta, nu, args.plot_save)
+        plot_results(data, S, I, R, beta, nu, args.plot_save, use_cumulative=use_cumulative)
     
     print(f"\nPipeline completed successfully!")
+    print(f"\nFitted Parameters:")
+    print(f"  Beta (infection rate): {beta:.6f}")
+    print(f"  Nu (recovery rate): {nu:.6f}")
+    print(f"  R0 (reproduction number): {beta/nu:.4f}")
 
 
 if __name__ == '__main__':
