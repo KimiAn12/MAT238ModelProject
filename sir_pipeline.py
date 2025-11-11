@@ -145,7 +145,7 @@ def fit_parameters(data: pd.DataFrame, S0: int, I0: int, R0: int, N: int) -> Tup
         
         if result.success:
             beta_opt, nu_opt = result.x
-            print(f"Optimization successful (L-BFGS-B): β = {beta_opt:.6f}, ν = {nu_opt:.6f}")
+            print(f"Optimization successful (L-BFGS-B): beta = {beta_opt:.6f}, nu = {nu_opt:.6f}")
             return beta_opt, nu_opt
     except Exception as e:
         print(f"Local optimization failed: {e}")
@@ -162,7 +162,7 @@ def fit_parameters(data: pd.DataFrame, S0: int, I0: int, R0: int, N: int) -> Tup
     )
     
     beta_opt, nu_opt = result.x
-    print(f"Optimization successful (differential_evolution): β = {beta_opt:.6f}, ν = {nu_opt:.6f}")
+    print(f"Optimization successful (differential_evolution): beta = {beta_opt:.6f}, nu = {nu_opt:.6f}")
     return beta_opt, nu_opt
 
 
@@ -252,7 +252,7 @@ def plot_results(data: pd.DataFrame, S: np.ndarray, I: np.ndarray, R: np.ndarray
                     label='Observed Infections', s=50, alpha=0.7)
     axes[0].set_xlabel('Date')
     axes[0].set_ylabel('Number of Infected')
-    axes[0].set_title(f'SIR Model Fit: Infections (β = {beta:.4f}, ν = {nu:.4f})')
+    axes[0].set_title(f'SIR Model Fit: Infections (beta = {beta:.4f}, nu = {nu:.4f})')
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
     axes[0].tick_params(axis='x', rotation=45)
@@ -334,7 +334,7 @@ def main():
     print(f"  Initial Recovered (R0): {R0:,}")
     
     # Fit parameters
-    print(f"\nFitting parameters β and ν...")
+    print(f"\nFitting parameters beta and nu...")
     beta, nu = fit_parameters(data, S0, I0, R0, args.population)
     
     # Run simulation
